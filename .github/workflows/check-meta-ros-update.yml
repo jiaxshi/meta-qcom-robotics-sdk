@@ -12,9 +12,12 @@ jobs:
     if: github.repository_owner == 'jiaxshi'
     permissions:
       contents: write
+      workflows: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          repository: qualcomm-linux/meta-qcom-robotics-sdk
 
       - name: Get current meta-ros commit from yml
         id: current
@@ -119,16 +122,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Save the updated file before switching base.
-          # The checkout is from the fork; base the PR branch on upstream/main instead
-          # so the PR contains only the meta-ros change, not fork-specific commits
-          # (e.g. this workflow file).
-          cp ci/qcom-robotics-distro.yml /tmp/updated-distro.yml
-          git remote add upstream https://github.com/qualcomm-linux/meta-qcom-robotics-sdk.git
-          git fetch upstream main --depth=1
-          git checkout -b "$BRANCH" upstream/main
-          cp /tmp/updated-distro.yml ci/qcom-robotics-distro.yml
+          git checkout -b "$BRANCH"
 
           {
             echo "chore(ci): update meta-ros to $SHORT"
@@ -151,9 +145,10 @@ jobs:
 
           git add ci/qcom-robotics-distro.yml
           git commit -F /tmp/commit-msg.txt
-          # Force-push: remote may have a stale branch from a prior run whose PR
-          # was closed without merging; this branch is bot-managed so forcing is safe.
-          git push origin "$BRANCH" --force
+          # Push to fork; origin points to upstream (read-only), so add fork as a separate remote.
+          # Force-push: bot-managed branch, stale remote refs are safe to overwrite.
+          git remote add fork "https://x-access-token:${GITHUB_TOKEN}@github.com/jiaxshi/meta-qcom-robotics-sdk.git"
+          git push fork "$BRANCH" --force
 
       - name: Create pull request to upstream
         if: steps.check.outputs.needed == 'true' && steps.existing.outputs.count == '0'
