@@ -12,7 +12,6 @@ jobs:
     if: github.repository_owner == 'jiaxshi'
     permissions:
       contents: write
-      workflows: write
 
     steps:
       - uses: actions/checkout@v4
@@ -113,7 +112,7 @@ jobs:
       - name: Commit and push update branch
         if: steps.check.outputs.needed == 'true' && steps.existing.outputs.count == '0'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           OLD="${{ steps.current.outputs.commit }}"
           NEW="${{ steps.latest.outputs.commit }}"
