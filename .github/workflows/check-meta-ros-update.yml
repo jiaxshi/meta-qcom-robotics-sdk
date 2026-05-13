@@ -119,7 +119,16 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
+
+          # Save the updated file before switching base.
+          # The checkout is from the fork; base the PR branch on upstream/main instead
+          # so the PR contains only the meta-ros change, not fork-specific commits
+          # (e.g. this workflow file).
+          cp ci/qcom-robotics-distro.yml /tmp/updated-distro.yml
+          git remote add upstream https://github.com/qualcomm-linux/meta-qcom-robotics-sdk.git
+          git fetch upstream main --depth=1
+          git checkout -b "$BRANCH" upstream/main
+          cp /tmp/updated-distro.yml ci/qcom-robotics-distro.yml
 
           {
             echo "chore(ci): update meta-ros to $SHORT"
