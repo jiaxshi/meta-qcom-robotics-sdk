@@ -2,22 +2,119 @@ name: Check meta-ros updates
 
 on:
   schedule:
-    - cron: "22 10 5 * *"   # monthly - 5th day at 10:22 UTC
+    - cron: "22 10 1-7 * 2"   # first Tuesday of each month at 10:22 UTC
   workflow_dispatch:
+    inputs:
+      sdk_branches:
+        description: 'JSON array of SDK branches to check, e.g. ["main","wrynose"]. Empty = auto-discover.'
+        required: false
+        default: ''
+      metaros_map:
+        description: 'JSON object overriding SDK→meta-ros branch mapping, e.g. {"wrynose":"wrynose"}. Merged with defaults.'
+        required: false
+        default: ''
 
 jobs:
-  check-and-update:
+  discover-branches:
     runs-on: ubuntu-24.04
     # Only run in the fork, not if someone else forks this repo
     if: github.repository_owner == 'jiaxshi'
+    outputs:
+      branches: ${{ steps.list.outputs.branches }}
+
+    steps:
+      - name: List relevant SDK branches
+        id: list
+        env:
+          SDK_BRANCHES_INPUT: ${{ inputs.sdk_branches }}
+        run: |
+          if [ -n "$SDK_BRANCHES_INPUT" ]; then
+            echo "branches=$SDK_BRANCHES_INPUT" >> "$GITHUB_OUTPUT"
+          else
+            # Explicit list of SDK branches to check.
+            # Add new Yocto release branches here when they are created.
+            echo 'branches=["main","wrynose"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  check-and-update:
+    needs: discover-branches
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
+    strategy:
+      matrix:
+        branch: ${{ fromJson(needs.discover-branches.outputs.branches) }}
+      fail-fast: false
 
     steps:
       - uses: actions/checkout@v4
         with:
           repository: qualcomm-linux/meta-qcom-robotics-sdk
+          ref: ${{ matrix.branch }}
           persist-credentials: false
+
+      - name: Determine meta-ros branch to track
+        id: metaros-branch
+        env:
+          SDK_BRANCH: ${{ matrix.branch }}
+          METAROS_MAP_OVERRIDE: ${{ inputs.metaros_map }}
+        run: |
+          # Priority 1: workflow_dispatch override map
+          if [ -n "$METAROS_MAP_OVERRIDE" ]; then
+            branch_from_input=$(echo "$METAROS_MAP_OVERRIDE" | python3 -c "import sys,json,os;m=json.load(sys.stdin);print(m.get(os.environ['SDK_BRANCH'],''))" 2>/dev/null || true)
+            if [ -n "$branch_from_input" ]; then
+              echo "branch=$branch_from_input" >> "$GITHUB_OUTPUT"
+              echo "Source: workflow_dispatch override → $branch_from_input"
+              exit 0
+            fi
+          fi
+
+          # Priority 2: read branch: field from kas YAML
+          branch_from_yaml=$(python3 - <<'PYEOF'
+          import re, sys
+          try:
+              with open('ci/qcom-robotics-distro.yml') as f:
+                  lines = f.readlines()
+              in_section = False
+              for line in lines:
+                  if re.match(r'^  meta-ros:', line):
+                      in_section = True
+                  elif in_section and re.match(r'^  \S', line):
+                      in_section = False
+                  if in_section and re.match(r'^    branch:', line):
+                      print(line.split(':', 1)[1].strip())
+                      sys.exit(0)
+          except Exception:
+              pass
+          PYEOF
+          )
+          if [ -n "$branch_from_yaml" ]; then
+            echo "branch=$branch_from_yaml" >> "$GITHUB_OUTPUT"
+            echo "Source: kas YAML branch field → $branch_from_yaml"
+            exit 0
+          fi
+
+          # Priority 3: hardcoded default map — update this when meta-ros creates new release branches
+          DEFAULT_MAP='{"main":"master","wrynose":"master"}'
+          branch_from_default=$(echo "$DEFAULT_MAP" | python3 -c "import sys,json,os;m=json.load(sys.stdin);print(m.get(os.environ['SDK_BRANCH'],''))")
+          if [ -n "$branch_from_default" ]; then
+            echo "branch=$branch_from_default" >> "$GITHUB_OUTPUT"
+            echo "Source: default map → $branch_from_default"
+            exit 0
+          fi
+
+          # Priority 4: check if meta-ros has a branch with the same name
+          status=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://api.github.com/repos/ros/meta-ros/branches/$SDK_BRANCH")
+          if [ "$status" = "200" ]; then
+            echo "branch=$SDK_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "Source: meta-ros same-name branch → $SDK_BRANCH"
+            exit 0
+          fi
+
+          # Priority 5: final fallback
+          echo "branch=master" >> "$GITHUB_OUTPUT"
+          echo "Source: fallback → master"
 
       - name: Get current meta-ros commit from yml
         id: current
@@ -39,12 +136,13 @@ jobs:
           )
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
-      - name: Get latest meta-ros commit from upstream master
+      - name: Get latest meta-ros commit from upstream
         id: latest
         run: |
-          commit=$(git ls-remote https://github.com/ros/meta-ros.git refs/heads/master refs/heads/main | head -1 | cut -f1)
+          METAROS_BRANCH="${{ steps.metaros-branch.outputs.branch }}"
+          commit=$(git ls-remote https://github.com/ros/meta-ros.git "refs/heads/$METAROS_BRANCH" | cut -f1)
           if [ -z "$commit" ]; then
-            echo "ERROR: could not find master or main branch on meta-ros upstream" >&2
+            echo "ERROR: could not find branch $METAROS_BRANCH on meta-ros upstream" >&2
             exit 1
           fi
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
@@ -55,24 +153,39 @@ jobs:
         run: |
           if [ "${{ steps.current.outputs.commit }}" = "${{ steps.latest.outputs.commit }}" ]; then
             echo "needed=false" >> "$GITHUB_OUTPUT"
-            echo "meta-ros is already up to date at ${{ steps.current.outputs.commit }}"
+            echo "Already up to date at ${{ steps.current.outputs.commit }}"
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
             echo "Update available: ${{ steps.current.outputs.commit }} -> ${{ steps.latest.outputs.commit }}"
           fi
 
-      - name: Check for existing open PR for this commit
+      - name: Check for existing open PR
         if: steps.check.outputs.needed == 'true'
         id: existing
         run: |
-          branch="chore/update-meta-ros-${{ steps.latest.outputs.short }}"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          SDK_BRANCH="${{ matrix.branch }}"
+          SHORT="${{ steps.latest.outputs.short }}"
+          branch_new="chore/update-meta-ros-${SDK_BRANCH}-${SHORT}"
+          branch_old="chore/update-meta-ros-${SHORT}"
+          echo "branch=$branch_new" >> "$GITHUB_OUTPUT"
 
-          # Use unauthenticated REST API to avoid SAML SSO requirement on qualcomm-linux org
-          count=$(curl -s \
-            "https://api.github.com/repos/qualcomm-linux/meta-qcom-robotics-sdk/pulls?state=open&head=jiaxshi:${branch}&per_page=1" \
-            | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+          # Check new naming convention first
+          response=$(curl -s \
+            "https://api.github.com/repos/qualcomm-linux/meta-qcom-robotics-sdk/pulls?state=open&head=jiaxshi:${branch_new}&per_page=1")
+          count=$(echo "$response" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+          url=$(echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['html_url'] if d else '')")
+
+          # Check old naming only for main: pre-multi-branch PRs had no SDK branch prefix,
+          # so this can only match PRs originally created for main.
+          if [ "$count" = "0" ] && [ "$SDK_BRANCH" = "main" ]; then
+            response=$(curl -s \
+              "https://api.github.com/repos/qualcomm-linux/meta-qcom-robotics-sdk/pulls?state=open&head=jiaxshi:${branch_old}&per_page=1")
+            count=$(echo "$response" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+            url=$(echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['html_url'] if d else '')")
+          fi
+
           echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
 
       - name: Update meta-ros commit in yml
         if: steps.check.outputs.needed == 'true' && steps.existing.outputs.count == '0'
@@ -115,19 +228,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
+          SDK_BRANCH="${{ matrix.branch }}"
           OLD="${{ steps.current.outputs.commit }}"
           NEW="${{ steps.latest.outputs.commit }}"
           SHORT="${{ steps.latest.outputs.short }}"
           BRANCH="${{ steps.existing.outputs.branch }}"
+          METAROS_BRANCH="${{ steps.metaros-branch.outputs.branch }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
 
           {
-            echo "chore(ci): update meta-ros to $SHORT"
+            echo "chore(ci): update meta-ros to $SHORT ($SDK_BRANCH)"
             echo ""
-            echo "Motivation: meta-ros upstream has new commits on the master branch."
+            echo "Motivation: meta-ros upstream has new commits on the $METAROS_BRANCH branch."
             echo "Previous commit: $OLD"
             echo "New commit: $NEW"
             echo ""
@@ -152,22 +267,25 @@ jobs:
 
       - name: Create pull request to upstream
         if: steps.check.outputs.needed == 'true' && steps.existing.outputs.count == '0'
+        id: create-pr
         env:
           GH_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
+          SDK_BRANCH="${{ matrix.branch }}"
           OLD="${{ steps.current.outputs.commit }}"
           NEW="${{ steps.latest.outputs.commit }}"
           SHORT="${{ steps.latest.outputs.short }}"
           BRANCH="${{ steps.existing.outputs.branch }}"
+          METAROS_BRANCH="${{ steps.metaros-branch.outputs.branch }}"
 
           {
             printf '## Summary\n\n'
-            printf 'Update `meta-ros` commit hash to the latest upstream `master`.\n\n'
+            printf 'Update `meta-ros` commit hash to the latest upstream `%s` branch.\n\n' "$METAROS_BRANCH"
             printf '| | Commit |\n|---|---|\n'
             printf '| **Previous** | `%s` |\n' "$OLD"
             printf '| **New** | `%s` |\n\n' "$NEW"
             printf '## Motivation\n\n'
-            printf 'meta-ros upstream has new commits on the master branch. This update\n'
+            printf 'meta-ros upstream has new commits on the `%s` branch. This update\n' "$METAROS_BRANCH"
             printf 'pulls in the latest upstream changes.\n\n'
             printf '## Impact\n\n'
             printf 'Pulls in upstream meta-ros changes. Patch compatibility has not been\n'
@@ -184,9 +302,38 @@ jobs:
             fi
           } > /tmp/pr-body.md
 
-          gh pr create \
+          pr_url=$(gh pr create \
             --repo qualcomm-linux/meta-qcom-robotics-sdk \
             --head "jiaxshi:$BRANCH" \
-            --base main \
-            --title "chore(ci): update meta-ros to $SHORT" \
-            --body-file /tmp/pr-body.md
+            --base "$SDK_BRANCH" \
+            --title "chore(ci): update meta-ros to $SHORT ($SDK_BRANCH)" \
+            --body-file /tmp/pr-body.md)
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        if: always()
+        run: |
+          SDK_BRANCH="${{ matrix.branch }}"
+          METAROS_BRANCH="${{ steps.metaros-branch.outputs.branch }}"
+          CURRENT="${{ steps.current.outputs.commit }}"
+          LATEST="${{ steps.latest.outputs.commit }}"
+          NEEDED="${{ steps.check.outputs.needed }}"
+          EXISTING_URL="${{ steps.existing.outputs.url }}"
+          PR_URL="${{ steps.create-pr.outputs.pr_url }}"
+
+          {
+            echo "## \`$SDK_BRANCH\` → meta-ros \`$METAROS_BRANCH\`"
+            echo ""
+            if [ "$NEEDED" = "false" ]; then
+              echo "Already up to date at \`$CURRENT\`"
+            elif [ -n "$EXISTING_URL" ]; then
+              echo "PR already open: $EXISTING_URL"
+            elif [ -n "$PR_URL" ]; then
+              echo "**PR created:** $PR_URL"
+            elif [ "$NEEDED" = "true" ]; then
+              echo "Update needed (\`$CURRENT\` → \`$LATEST\`) — no PR created, check step logs"
+            else
+              echo "No result — check step logs"
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
