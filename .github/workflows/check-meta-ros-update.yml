@@ -23,6 +23,15 @@ jobs:
       branches: ${{ steps.list.outputs.branches }}
 
     steps:
+      - name: Enforce first-week gate
+        if: github.event_name == 'schedule'
+        run: |
+          day=$(date +%d | sed 's/^0//')
+          if [ "$day" -gt 7 ]; then
+            echo "Today is day $day — not in week 1, skipping (cron day-of-month/day-of-week OR quirk)."
+            exit 1
+          fi
+
       - name: List relevant SDK branches
         id: list
         env:
