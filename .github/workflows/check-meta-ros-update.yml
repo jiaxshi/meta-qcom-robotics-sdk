@@ -249,7 +249,7 @@ jobs:
           git checkout -b "$BRANCH"
 
           {
-            echo "chore(ci): update meta-ros to $SHORT ($SDK_BRANCH)"
+            echo "ci: update meta-ros to $SHORT ($SDK_BRANCH)"
             echo ""
             echo "Motivation: meta-ros upstream has new commits on the $METAROS_BRANCH branch."
             echo "Previous commit: $OLD"
@@ -268,7 +268,7 @@ jobs:
           } > /tmp/commit-msg.txt
 
           git add ci/qcom-robotics-distro.yml
-          git commit -F /tmp/commit-msg.txt
+          git commit -s -F /tmp/commit-msg.txt
           # Push to fork; origin points to upstream (read-only), so add fork as a separate remote.
           # Force-push: bot-managed branch, stale remote refs are safe to overwrite.
           git remote add fork "https://x-access-token:${GITHUB_TOKEN}@github.com/jiaxshi/meta-qcom-robotics-sdk.git"
