@@ -2,7 +2,7 @@ name: Check meta-ros updates
 
 on:
   schedule:
-    - cron: "22 10 1-7 * 2"   # first Tuesday of each month at 10:22 UTC
+    - cron: "22 10 1-7 */2 2"  # first Tuesday of every other month at 10:22 UTC
   workflow_dispatch:
     inputs:
       sdk_branches:
@@ -104,7 +104,7 @@ jobs:
           fi
 
           # Priority 3: hardcoded default map — update this when meta-ros creates new release branches
-          DEFAULT_MAP='{"main":"master","wrynose":"master"}'
+          DEFAULT_MAP='{"main":"master","wrynose":"wrynose"}'
           branch_from_default=$(echo "$DEFAULT_MAP" | python3 -c "import sys,json,os;m=json.load(sys.stdin);print(m.get(os.environ['SDK_BRANCH'],''))")
           if [ -n "$branch_from_default" ]; then
             echo "branch=$branch_from_default" >> "$GITHUB_OUTPUT"
