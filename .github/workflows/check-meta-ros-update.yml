@@ -27,8 +27,13 @@ jobs:
         if: github.event_name == 'schedule'
         run: |
           day=$(date +%d | sed 's/^0//')
+          dow=$(date +%u)  # 1=Mon … 7=Sun; Tuesday=2
           if [ "$day" -gt 7 ]; then
             echo "Today is day $day — not in week 1, skipping (cron day-of-month/day-of-week OR quirk)."
+            exit 1
+          fi
+          if [ "$dow" -ne 2 ]; then
+            echo "Today is $(date +%A) (dow=$dow) — not Tuesday, skipping (cron day-of-month/day-of-week OR quirk)."
             exit 1
           fi
 
